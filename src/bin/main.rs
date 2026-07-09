@@ -1,9 +1,12 @@
 #![no_std]
 #![no_main]
 
-use core::hint::spin_loop;
+extern crate alloc;
+
+use alloc::string::String;
+use core::cell::RefCell;
+use embedded_graphics::{pixelcolor::BinaryColor, prelude::*};
 use esp_backtrace as _;
-use esp_bootloader_esp_idf::esp_app_desc;
 use esp_hal::{
     clock::CpuClock,
     delay::Delay,
@@ -13,173 +16,126 @@ use esp_hal::{
     main,
     time::Rate,
     timer::timg::TimerGroup,
+    Config,
 };
 use esp_println::println;
+use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
 
-// ===== 堆分配器 (esp-radio + esp-rtos 需要) =====
-use esp_alloc as _;
+// ===== 堆分配器 =====
+esp_bootloader_esp_idf::esp_app_desc!();
 #[unsafe(no_mangle)]
 static mut HEAP: core::mem::MaybeUninit<[u8; 72 * 1024]> = core::mem::MaybeUninit::uninit();
 unsafe fn init_heap() {
     esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
-        HEAP.as_mut_ptr() as *mut u8,
+        core::ptr::addr_of_mut!(HEAP) as *mut u8,
         72 * 1024,
         esp_alloc::MemoryCapability::Internal.into(),
     ));
 }
-use ssd1306::{I2CDisplayInterface, Ssd1306, prelude::*};
 
 #[path = "../menu.rs"]
 mod menu;
+#[path = "../provision.rs"]
+mod provision;
+#[path = "../qrcode.rs"]
+mod qrcode;
 #[path = "../ui.rs"]
 mod ui;
 #[path = "../viewmodel.rs"]
 mod viewmodel;
+#[path = "../wifi.rs"]
+mod wifi;
 
-use menu::{BufCanvas, MenuEngine, MenuItem, MenuPage};
-use viewmodel::ViewModel;
+use menu::*;
+use ui::*;
+use viewmodel::*;
 
-esp_app_desc!();
+// ===== ESP32-C3 引脚 (按 u8gg-c3 备份) =====
+// K1=GPIO1, K2=GPIO2, K3=GPIO3, K4=GPIO4; OLED SDA=GPIO8, SCL=GPIO9
 
-// ===== bind 变量索引（自动计数） =====
 macro_rules! define_binds {
     ($($name:ident),+ $(,)?) => { define_binds!(@step 0usize, $($name),+); };
-    (@step $n:expr, $last:ident $(,)?) => { pub const $last: usize = $n; };
     (@step $n:expr, $first:ident, $($rest:ident),+ $(,)?) => {
         pub const $first: usize = $n;
         define_binds!(@step ($n) + 1, $($rest),+);
     };
+    (@step $n:expr, $first:ident) => {
+        pub const $first: usize = $n;
+    };
 }
-define_binds! { FPS, SLIDER, TOGGLE }
+define_binds! { FPS, SLIDER, TOGGLE, SHOW_QR, WIFI_MANUAL }
 
-// ===== 菜单数据 =====
+const WIFI_SSID: &str = "your_wifi_ssid";
+const WIFI_PASS: &str = "your_wifi_password";
+
 static PAGE_SUB: MenuPage = MenuPage {
     title: "子菜单",
     items: &[
-        MenuItem::Submenu {
-            label: "选项 A",
-            page: &PAGE_SUB,
-        },
-        MenuItem::Label { label: "选项 B" },
-        MenuItem::Label { label: "选项 C" },
+        MenuItem::Submenu { label: "更深一层", page: &PAGE_DEEP },
+        MenuItem::Submenu { label: "返回", page: &PAGE_MAIN },
     ],
+};
+static PAGE_DEEP: MenuPage = MenuPage {
+    title: "深层",
+    items: &[MenuItem::Submenu { label: "返回", page: &PAGE_SUB }],
 };
 static PAGE_ABOUT: MenuPage = MenuPage {
     title: "关于",
     items: &[
-        MenuItem::Label {
-            label: "u8gg UI v0.3",
-        },
-        MenuItem::Label {
-            label: "ESP32 + SSD1306",
-        },
-        MenuItem::Label {
-            label: "Inspired from OLED_UI",
-        },
-        MenuItem::Label {
-            label: "Apache-2.0",
-        },
+        MenuItem::Label { label: "u8gg v0.1" },
+        MenuItem::Label { label: "ESP32-C3" },
+        MenuItem::Label { label: "Apache-2.0" },
+        MenuItem::Label { label: ("Powered by Deepseek V4 Flash") },
     ],
 };
 static PAGE_MAIN: MenuPage = MenuPage {
     title: "主菜单",
     items: &[
-        MenuItem::Label { label: "按键" },
-        MenuItem::Button {
-            label: "Hello",
-            action: |e| e.show_toast("你好！Toast !", 30),
-        },
-        MenuItem::Button {
-            label: "SV",
-            action: |e| {
-                let v = e.bind_u8s[SLIDER];
-                e.toast_buf = [0; 20];
-                e.toast_buf[..3].copy_from_slice(b"SV=");
-                e.toast_buf[3] = b'0' + v / 10;
-                e.toast_buf[4] = b'0' + v % 10;
-                e.toast_buf_len = 5;
-                e.show_toast("", 20);
-                e.toast_msg = ::core::option::Option::None;
-            },
-        },
-        MenuItem::Slider {
-            label: "滑条",
-            bind: SLIDER,
-            min: 0,
-            max: 100,
-        },
-        MenuItem::Toggle {
-            label: "一个开关",
-            bind: TOGGLE,
-        },
-        MenuItem::Toggle {
-            label: "帧率显示",
-            bind: FPS,
-        },
-        MenuItem::Submenu {
-            label: "子菜单测试",
-            page: &PAGE_SUB,
-        },
-        MenuItem::Submenu {
-            label: "关于",
-            page: &PAGE_ABOUT,
-        },
+        MenuItem::Submenu { label: "子菜单", page: &PAGE_SUB },
+        MenuItem::Toggle { label: "FPS ", bind: FPS },
+        MenuItem::Slider { label: "亮度", bind: SLIDER, min: 0, max: 255 },
+        MenuItem::Toggle { label: "按键测试", bind: TOGGLE },
+        MenuItem::Toggle { label: "WiFi QR", bind: SHOW_QR },
+        MenuItem::Toggle { label: "手动配网", bind: WIFI_MANUAL },
+        MenuItem::Submenu { label: "关于", page: &PAGE_ABOUT },
     ],
 };
 
 #[main]
 fn main() -> ! {
-    let peripherals = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
-    // 初始化堆分配器 (必须在任何堆分配调用之前)
+    let peripherals = esp_hal::init(Config::default().with_cpu_clock(CpuClock::max()));
     unsafe { init_heap(); }
-    let delay = Delay::new();
     println!("[u8gg] Boot OK");
 
-    // ===== 启动 RTOS 调度器 (esp-radio 要求，必须在任何 WiFi 调用之前) =====
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
     println!("[u8gg] RTOS started");
 
-    // ===== WiFi 连接 (参考 ESP-IDF DPP Enrollee 例子的事件驱动模式) =====
-    // 取消注释并填入你的 SSID/密码即可使用:
-    // let (mut wifi_ctrl, _interfaces) = esp_radio::wifi::new(
-    //     peripherals.WIFI,
-    //     Default::default(),
-    // ).unwrap();
-    // wifi::connect_blocking(&mut wifi_ctrl, "YourSSID", "YourPassword", &delay);
-    // let mut wifi_retry = 0u8;
-    // 然后在主循环中加入: wifi::tick(&mut wifi_ctrl, &mut wifi_retry);
+    let (mut wifi_ctrl, _interfaces) =
+        esp_radio::wifi::new(peripherals.WIFI, Default::default()).unwrap();
+    println!("[u8gg] WiFi initialized");
+    let mut wifi_retry = 0u8;
 
-    let mut led = Output::new(peripherals.GPIO2, Level::Low, OutputConfig::default());
-    led.set_high();
-    spin_delay(200);
-
-    let k1 = Input::new(
-        peripherals.GPIO23,
-        InputConfig::default().with_pull(Pull::Up),
-    );
-    let k2 = Input::new(
-        peripherals.GPIO25,
-        InputConfig::default().with_pull(Pull::Up),
-    );
-    let k3 = Input::new(
-        peripherals.GPIO26,
-        InputConfig::default().with_pull(Pull::Up),
-    );
-    let k4 = Input::new(
-        peripherals.GPIO27,
-        InputConfig::default().with_pull(Pull::Up),
-    );
+    let k1 = Input::new(peripherals.GPIO1, InputConfig::default().with_pull(Pull::Up));
+    let k2 = Input::new(peripherals.GPIO2, InputConfig::default().with_pull(Pull::Up));
+    let k3 = Input::new(peripherals.GPIO3, InputConfig::default().with_pull(Pull::Up));
+    let k4 = Input::new(peripherals.GPIO4, InputConfig::default().with_pull(Pull::Up));
 
     let mut i2c = I2c::new(
         peripherals.I2C0,
-        I2cConfig::default().with_frequency(Rate::from_khz(600)),
+        I2cConfig::default().with_frequency(Rate::from_khz(400)),
     )
     .unwrap()
-    .with_sda(peripherals.GPIO21)
-    .with_scl(peripherals.GPIO22);
+    .with_sda(peripherals.GPIO8)
+    .with_scl(peripherals.GPIO9);
     let addr_ok = i2c.write(0x3D, &[0x00]).is_ok();
+    println!("[u8gg] I2C probe 0x3D: {}", if addr_ok { "OK" } else { "FAIL" });
+    if !addr_ok {
+        // 尝试标准地址 0x3C
+        let addr2_ok = i2c.write(0x3C, &[0x00]).is_ok();
+        println!("[u8gg] I2C probe 0x3C: {}", if addr2_ok { "OK" } else { "FAIL" });
+    }
     let iface = if addr_ok {
         I2CDisplayInterface::new_alternate_address(i2c)
     } else {
@@ -187,135 +143,98 @@ fn main() -> ! {
     };
     let mut display = Ssd1306::new(iface, DisplaySize128x64, DisplayRotation::Rotate0)
         .into_buffered_graphics_mode();
-    let mut ok = false;
+    let mut oled_ok = false;
     for i in 0..10 {
         spin_delay(100);
         if display.init().is_ok() {
             println!("[u8gg] OLED init OK (attempt {})", i + 1);
-            ok = true;
+            oled_ok = true;
             break;
         }
-        println!("[u8gg] OLED init FAIL (attempt {})", i + 1);
     }
-    if ok {
-        display.set_brightness(Brightness::BRIGHTEST).unwrap();
+    if !oled_ok {
+        println!("[u8gg] OLED init FAILED — will skip display");
+    } else {
+        display.clear(BinaryColor::Off).unwrap();
+        let _ = display.flush();
     }
-
-    use embedded_graphics::pixelcolor::BinaryColor;
 
     let mut vm = ViewModel::new(&PAGE_MAIN);
-    let mut buf = BufCanvas::new();
+    vm.menu.set_page(&PAGE_MAIN);
+    vm.menu.dirty = true;
+    vm.set_wifi(WIFI_SSID, WIFI_PASS);
 
-    let mut pk = [false; 4];
+    let mut canvas = menu::BufCanvas([0u8; 1024]);
+
+    let mut tick_ms = 0u32;
+    let mut fps_counter = 0u32;
+    let mut last_fps_print = 0u32;
+    let mut pk = [true; 4];
     let mut hold = [0u16; 4];
-    let mut repeat_up = false;
-    let mut repeat_down = false;
-    let mut loop_tick = 0u16;
-    let mut render_tick = 0u16;
 
     loop {
-        loop_tick += 1;
-        if loop_tick >= 50 {
-            vm.menu.fps = render_tick.min(99);
-            render_tick = 0;
-            loop_tick = 0;
-        }
+        spin_delay(5);
+        tick_ms = tick_ms.wrapping_add(5);
+        fps_counter += 1;
 
         let c = [k1.is_low(), k2.is_low(), k3.is_low(), k4.is_low()];
-        let edge = [
-            c[0] && !pk[0],
-            c[1] && !pk[1],
-            c[2] && !pk[2],
-            c[3] && !pk[3],
-        ];
-        let release = [
-            !c[0] && pk[0],
-            !c[1] && pk[1],
-            !c[2] && pk[2],
-            !c[3] && pk[3],
-        ];
-        let long_edge = [false; 4];
-        let mut ok = edge[0]
-            || edge[1]
-            || edge[2]
-            || edge[3]
-            || release[0]
-            || release[1]
-            || release[2]
-            || release[3];
+        let edge = [c[0] && !pk[0], c[1] && !pk[1], c[2] && !pk[2], c[3] && !pk[3]];
+        let mut long_edge = [false; 4];
+        let mut repeat_up = false;
+        let mut repeat_down = false;
 
-        // 连发加速
-        repeat_up = false;
-        repeat_down = false;
-        for i in 0..2 {
-            if c[i] {
-                hold[i] = hold[i].saturating_add(1);
-            } else {
-                hold[i] = 0;
-            }
+        for i in 0..4 {
+            if c[i] { hold[i] = hold[i].saturating_add(1); } else { hold[i] = 0; }
             let h = hold[i];
-            if h >= 66 {
-                // 66*20ms=1.3s 启动连发
-                let interval = if h < 90 {
-                    4
-                } else if h < 120 {
-                    3
-                } else {
-                    2
-                };
-                if (h - 66) % interval == 0 {
-                    if i == 0 {
-                        repeat_up = true;
-                    } else {
-                        repeat_down = true;
+            if i < 2 {
+                if h >= 66 {
+                    let interval = if h < 90 { 4 } else if h < 120 { 3 } else { 2 };
+                    if (h - 66) % interval == 0 {
+                        if i == 0 { repeat_up = true; } else { repeat_down = true; }
                     }
-                    ok = true;
                 }
+            } else if h == 66 {
+                long_edge[i] = true;
             }
         }
         pk = c;
 
-        if edge[0]
-            || edge[1]
-            || edge[2]
-            || edge[3]
-            || long_edge[0]
-            || long_edge[1]
-            || long_edge[2]
-            || long_edge[3]
-        {
-            println!(
-                "[u8gg] key: U={} D={} B={} E={} long:B={} E={}",
-                edge[0] as u8,
-                edge[1] as u8,
-                edge[2] as u8,
-                edge[3] as u8,
-                long_edge[2] as u8,
-                long_edge[3] as u8
-            );
-        }
+        let any_key = edge[0] || edge[1] || edge[2] || edge[3]
+            || long_edge[2] || long_edge[3] || repeat_up || repeat_down;
 
         vm.handle_key(
-            edge[0] || repeat_up,
-            edge[1] || repeat_down,
-            edge[3],
-            edge[2],
-            long_edge[2],
-            long_edge[3],
+            edge[0] || repeat_up, edge[1] || repeat_down,
+            edge[3], edge[2], long_edge[2], long_edge[3],
         );
 
-        render_tick += 1;
-        buf.clear();
-        vm.render(&mut buf);
-        ViewModel::blit(&buf, &mut display);
-        let _ = display.flush();
-        led.toggle();
-        //delay.delay_millis(20);
+        let wifi_status = wifi::tick(&mut wifi_ctrl, &mut wifi_retry);
+        if vm.consume_wifi_connect() {
+            let ssid = vm.input_ssid();
+            let pass = vm.input_pass();
+            if !ssid.is_empty() {
+                println!("[u8gg] WiFi connect to \"{}\"", ssid);
+                wifi::connect(&mut wifi_ctrl, ssid, pass);
+                wifi_retry = 0;
+            }
+        }
+        vm.set_wifi_status(wifi_status);
+        vm.set_wifi_connected(wifi_ctrl.is_connected());
+
+        if oled_ok {
+            canvas.clear();
+            vm.render(&mut canvas);
+            ViewModel::blit(&canvas, &mut display);
+            let _ = display.flush();
+        }
+
+        if tick_ms - last_fps_print >= 5000 {
+            println!("[u8gg] FPS: {}", fps_counter * 1000 / (tick_ms - last_fps_print).max(1));
+            fps_counter = 0;
+            last_fps_print = tick_ms;
+        }
     }
 }
 
 fn spin_delay(ms: u32) {
-    for _ in 0..ms * 16000 {
-        spin_loop();
-    }
+    for _ in 0..ms * 16000 { core::hint::spin_loop(); }
 }

@@ -1,14 +1,17 @@
-//! Wi-Fi STA 连接组件 (no_std, esp-radio 0.18 + esp-rtos)
+//! Wi-Fi STA 连接组件
 //!
-//! 参考 ESP-IDF DPP Enrollee 例子的事件驱动模式：
-//! - RTOS 调度器启动 (替代 NVS init)
-//! - esp_radio::wifi::new() 替代 esp_wifi_init
-//! - set_config() + 轮询 is_connected() 替代 wifi_config_t + esp_wifi_connect
-//! - 事件驱动重连 (最多 3 次)
-//! - 提供 blocking / tick 两种姿态
+//! 用 connect_async 连接并持续轮询其 future 推进状态机。
+//! ctrl 存活于整个程序生命周期 (main 不返回), 故 safe 地 transmute 到 'static。
 
 extern crate alloc;
+use alloc::boxed::Box;
 use alloc::string::String;
+
+use core::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
+};
 use esp_radio::wifi::{
     sta::StationConfig,
     Config, WifiController,
@@ -16,17 +19,28 @@ use esp_radio::wifi::{
 use esp_println::println;
 
 // ============================================================================
-//  常量 (对应 DPP 的 WIFI_MAX_RETRY_NUM = 3)
+//  NOOP WAKER
 // ============================================================================
 
-/// 最大重连尝试次数
-const MAX_RETRY: u8 = 3;
+fn noop_waker() -> Waker {
+    const VTABLE: RawWakerVTable = RawWakerVTable::new(
+        |p| RawWaker::new(p, &VTABLE),
+        |_| {}, |_| {}, |_| {},
+    );
+    let raw = RawWaker::new(core::ptr::null(), &VTABLE);
+    unsafe { Waker::from_raw(raw) }
+}
 
-/// 连接超时 (毫秒)
-const CONNECT_TIMEOUT_MS: u64 = 30_000;
+type BoxFut = Pin<Box<dyn Future<Output = Result<esp_radio::wifi::ConnectedStationInfo, esp_radio::wifi::WifiError>>>>;
 
 // ============================================================================
-//  状态枚举 (给 UI 层用)
+//  常量
+// ============================================================================
+
+const MAX_RETRY: u8 = 10;
+
+// ============================================================================
+//  状态枚举
 // ============================================================================
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -38,20 +52,13 @@ pub enum WifiStatus {
 }
 
 // ============================================================================
-//  阻塞连接 (对应 DPP 的 dpp_enrollee_init — 事件组等待)
+//  连接状态机
 // ============================================================================
 
-/// 配置 SSID/Password 并阻塞等待连接成功或重试用完。
-///
-/// 通过轮询 `WifiController::is_connected()` 判断状态。
-/// 返回 `true` = 连接成功。
-pub fn connect_blocking(
-    ctrl: &mut WifiController<'_>,
-    ssid: &str,
-    password: &str,
-    delay: &esp_hal::delay::Delay,
-) -> bool {
-    // 配置 Station (对应 DPP 的 wifi_config_t + esp_wifi_set_config)
+static mut CONNECT_FUT: Option<BoxFut> = None;
+
+/// 配置并连接, 之后每帧调 tick() 推进。
+pub fn connect(ctrl: &mut WifiController<'_>, ssid: &str, password: &str) {
     let station_cfg = Config::Station(
         StationConfig::default()
             .with_ssid(String::from(ssid))
@@ -59,61 +66,70 @@ pub fn connect_blocking(
     );
     if let Err(e) = ctrl.set_config(&station_cfg) {
         println!("[wifi] set_config failed: {:?}", e);
-        return false;
+        return;
     }
 
+    // SAFETY: ctrl 在 main() 中, 程序永不退出, 生命周期等价于 'static
+    let ctrl_static: &'static mut WifiController<'static> = unsafe { core::mem::transmute(ctrl) };
+    let fut = ctrl_static.connect_async();
+    let mut boxed = Box::pin(fut);
+
+    // 首次 poll 触发 connect_impl
+    let w = noop_waker();
+    let mut cx = Context::from_waker(&w);
+    let _ = boxed.as_mut().poll(&mut cx);
+
+    unsafe { CONNECT_FUT = Some(boxed); }
     println!("[wifi] Connecting to \"{}\"...", ssid);
+}
 
-    // 轮询等待连接 (对应 DPP 的 xEventGroupWaitBits)
-    let mut retry_count: u8 = 0;
-    let deadline =
-        esp_hal::time::Instant::now() + esp_hal::time::Duration::from_millis(CONNECT_TIMEOUT_MS);
-
-    loop {
-        if ctrl.is_connected() {
-            println!("[wifi] Connected to \"{}\" ✓", ssid);
-            return true;
-        }
-
-        // 驱动内部状态机：set_config 会在 RTOS 中自动触发连接，
-        // 此处只需等待即可。
-        if retry_count < MAX_RETRY {
-            retry_count += 1;
-        }
-
-        if esp_hal::time::Instant::now() >= deadline {
-            // 检查最终状态
-            if ctrl.is_connected() {
-                println!("[wifi] Connected to \"{}\" ✓", ssid);
-                return true;
+/// 每帧调用, 轮询 future 推进连接状态机。
+fn poll_fut() -> bool {
+    // SAFETY: 单线程, 通过 raw pointer
+    let p: *mut Option<BoxFut> = unsafe { core::ptr::addr_of_mut!(CONNECT_FUT) };
+    let fut = unsafe { &mut *p };
+    if let Some(f) = fut {
+        let w = noop_waker();
+        let mut cx = Context::from_waker(&w);
+        match f.as_mut().poll(&mut cx) {
+            Poll::Ready(Ok(info)) => {
+                println!("[wifi] Connected ✓ (aid={})", info.aid);
+                *fut = None;
+                true
             }
-            println!("[wifi] Connection TIMEOUT after {}ms", CONNECT_TIMEOUT_MS);
-            return false;
+            Poll::Ready(Err(e)) => {
+                println!("[wifi] Connect failed: {:?}", e);
+                *fut = None;
+                true
+            }
+            Poll::Pending => false,
         }
-
-        delay.delay_millis(50);
+    } else {
+        false
     }
 }
 
 // ============================================================================
-//  非阻塞 tick (给主循环每帧调用)
+//  非阻塞 tick
 // ============================================================================
 
-/// 在主循环中每帧调用，处理断线检测 + 自动重连。
-/// 对应 DPP 的 WIFI_EVENT_STA_DISCONNECTED handler 逻辑。
-///
-/// 返回当前连接状态。
 pub fn tick(ctrl: &mut WifiController<'_>, retry_count: &mut u8) -> WifiStatus {
+    let has_fut = unsafe { !(*core::ptr::addr_of!(CONNECT_FUT)).is_none() };
+    if has_fut {
+        poll_fut();
+    }
+
     if ctrl.is_connected() {
         *retry_count = 0;
+        unsafe { CONNECT_FUT = None; }
         WifiStatus::Connected
+    } else if has_fut {
+        WifiStatus::Connecting
+    } else if *retry_count < MAX_RETRY {
+        *retry_count += 1;
+        println!("[wifi] Disconnected! Retry {}/{}...", *retry_count, MAX_RETRY);
+        WifiStatus::Connecting
     } else {
-        if *retry_count < MAX_RETRY {
-            *retry_count += 1;
-            println!("[wifi] Disconnected! Retry {}/{}...", *retry_count, MAX_RETRY);
-            WifiStatus::Connecting
-        } else {
-            WifiStatus::Failed
-        }
+        WifiStatus::Failed
     }
 }
