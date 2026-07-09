@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 edition      = "2024"
 name         = "u8gg"
 rust-version = "1.88"
@@ -9,26 +9,24 @@ name = "u8gg"
 path = "./src/bin/main.rs"
 
 [dependencies]
-esp-hal = { version = "~1.1.0", features = ["esp32c3", "unstable", "rt"] }
+esp-hal = { version = "~1.1.0", features = ["esp32", "unstable"] }
 
-esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32c3"] }
+esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32"] }
 log = "0.4.33"
-esp-println = {version = "0.17.0", features = ["esp32c3" , "log-04"]}
+esp-println = {version = "0.17.0", features = ["esp32" , "log-04"]}
 
 critical-section = "1.2.0"
-esp-backtrace = { version = "0.19.0", features = ["esp32c3", "panic-handler", "println"], default-features = false }
+esp-backtrace = { version = "0.19.0", features = ["esp32", "panic-handler", "println"], default-features = false }
+nb = "1"
 embedded-graphics = "0.8.2"
 ssd1306 = "0.10.0"
 u8g2-fonts = { version = "0.8.0", features = ["embedded_graphics_textstyle"] }
 
-# WiFi
-esp-radio = { version = "0.18", features = ["esp32c3", "wifi", "esp-alloc", "unstable"] }
-esp-rtos  = { version = "0.3",  features = ["esp32c3", "esp-radio", "esp-alloc"] }
+# WiFi (鍙傝€?ESP-IDF DPP Enrollee 渚嬪瓙鐨勪簨浠堕┍鍔ㄦā寮?
+# esp-wifi 宸叉洿鍚嶄负 esp-radio
+esp-radio = { version = "0.18", features = ["esp32", "wifi", "esp-alloc", "unstable"] }
+esp-rtos  = { version = "0.3",  features = ["esp32", "esp-radio", "esp-alloc"] }
 esp-alloc = "0.10"
-smoltcp = { version = "0.13", default-features = false, features = ["alloc", "proto-ipv4", "socket-tcp", "medium-ethernet"] }
-embassy-net-driver = "0.2"
-heapless = "0.9"
-embedded-qr = "0.2.0"
 
 [profile.dev.package.esp-radio]
 opt-level = 3
