@@ -199,6 +199,8 @@ fn text_w(text: &str) -> i32 {
     w
 }
 fn cursor_rect(sel: usize, page: &MenuPage, scroll_off: f32) -> (f32, f32) {
+    let count = page.items.len();
+    let sel = if count == 0 { 0 } else { sel.min(count - 1) };
     let y = HEADER_H as f32 + sel as f32 * ITEM_H as f32 - scroll_off;
     let w = (text_w(label_text(&page.items[sel])) + 8).min(124) as f32;
     (y, w)
@@ -247,6 +249,7 @@ pub struct MenuEngine {
     kb_w: usize,
     pub cursor_radius: u32,
     pub fps: u16,
+    marquee_off: f32,
     pub toast_msg: ::core::option::Option<&'static str>,
     pub toast_buf: [u8; 20],
     pub toast_buf_len: u8,
@@ -287,6 +290,7 @@ impl MenuEngine {
             kb_w: 0,
             cursor_radius: 4,
             fps: 0,
+            marquee_off: 0.0,
             toast_msg: ::core::option::Option::None,
             toast_buf: [0; 20],
             toast_buf_len: 0,
@@ -431,7 +435,9 @@ impl MenuEngine {
                     self.trans_phase = 1;
                     self.depth += 1;
                     self.pages[self.depth] = sub;
-                    self.sel = self.sel_stack[self.depth];
+                    self.sel = self.sel_stack[self.depth].min(
+                        self.page().items.len().saturating_sub(1),
+                    );
                     let (ny, nw) = cursor_rect(self.sel, self.page(), 0.0);
                     self.cursor_y.snap(ny);
                     self.cursor_w.snap(nw);
@@ -463,7 +469,9 @@ impl MenuEngine {
             }
             (KeyEv::LongBack, _) => {
                 self.depth = 0;
-                self.sel = self.sel_stack[0];
+                self.sel = self.sel_stack[0].min(
+                    self.page().items.len().saturating_sub(1),
+                );
                 self.cursor_y = Anim::new(HEADER_H as f32 + self.sel as f32 * ITEM_H as f32);
                 self.cursor_w = Anim::new(100.0);
                 self.scroll.snap(0.0);
@@ -473,6 +481,17 @@ impl MenuEngine {
             }
             _ => {}
         }
+    }
+    /// 从字节切片显示 Toast (支持运行时消息, 最多 TOAST_BUF_LEN 字节)
+    pub fn show_toast_bytes(&mut self, msg: &[u8], frames: u8) {
+        let n = msg.len().min(self.toast_buf.len());
+        self.toast_buf[..n].copy_from_slice(&msg[..n]);
+        self.toast_buf_len = n as u8;
+        self.toast_timer = frames;
+        self.toast_anim = Anim::new(-22.0);
+        self.toast_anim.set(18.0);
+        self.toast_state = 0;
+        self.dirty = true;
     }
     pub fn set_page(&mut self, p: &'static MenuPage) {
         self.pages[self.depth] = p;
@@ -533,6 +552,16 @@ impl MenuEngine {
             self.scroll.set(st);
             self.scroll.update();
             self.aim_cursor();
+            // 跑马灯: 选定项文字超宽时向左滚动
+            let count = self.page().items.len();
+            if count > 0 && self.sel < count {
+                let tw = text_w(label_text(&self.page().items[self.sel]));
+                if tw > 116 {
+                    self.marquee_off += 1.0;
+                } else {
+                    self.marquee_off = 0.0;
+                }
+            }
         }
         if self.tg_anim_bind >= 0 {
             self.tg_anim.update();
@@ -600,13 +629,20 @@ impl MenuEngine {
                 continue;
             }
             let item = &render_items[i];
-            cn.render(
-                label_text(item),
-                Point::new(4, y + 2),
-                VerticalPosition::Top,
-                FontColor::Transparent(BinaryColor::On),
-                buf,
-            );
+            let txt = label_text(item);
+            let tw = text_w(txt);
+            // 跑马灯: 选中项超宽文字向左循环滚动 (双份渲染实现无缝衔接)
+            if i == self.sel && tw > 116 {
+                let cycle = tw - 116 + 8;
+                let moff = (self.marquee_off as i32) % cycle;
+                cn.render(txt, Point::new(4 - moff, y + 2),
+                    VerticalPosition::Top, FontColor::Transparent(BinaryColor::On), buf);
+                cn.render(txt, Point::new(4 - moff + cycle, y + 2),
+                    VerticalPosition::Top, FontColor::Transparent(BinaryColor::On), buf);
+            } else {
+                cn.render(txt, Point::new(4, y + 2),
+                    VerticalPosition::Top, FontColor::Transparent(BinaryColor::On), buf);
+            }
             match item {
                 MenuItem::Toggle { bind, .. } => {
                     let sw = 32u32;
