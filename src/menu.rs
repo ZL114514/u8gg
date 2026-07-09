@@ -353,18 +353,18 @@ impl MenuEngine {
         if self.editing && !self.switching {
             match (ev, item) {
                 (
-                    KeyEv::Up | KeyEv::Down,
+                    KeyEv::Up | KeyEv::Down | KeyEv::Back,
                     ::core::option::Option::Some(MenuItem::Slider { bind, min, max, .. }),
                 ) => {
                     if ev == KeyEv::Up && self.bind_u8s[*bind] < *max {
                         self.bind_u8s[*bind] = self.bind_u8s[*bind].saturating_add(5).min(*max);
                     }
-                    if ev == KeyEv::Down && self.bind_u8s[*bind] > *min {
+                    if (ev == KeyEv::Down || ev == KeyEv::Back) && self.bind_u8s[*bind] > *min {
                         self.bind_u8s[*bind] = self.bind_u8s[*bind].saturating_sub(5).max(*min);
                     }
                     self.dirty = true;
                 }
-                (KeyEv::Enter | KeyEv::Back, _) => {
+                (KeyEv::Enter, _) => {
                     self.editing = false;
                     self.dirty = true;
                 }
@@ -603,7 +603,7 @@ impl MenuEngine {
         let cn = FontRenderer::new::<u8g2_fonts::fonts::u8g2_font_wqy12_t_gb2312>()
             .with_ignore_unknown_chars(true);
         let so = self.scroll.val() as i32;
-        // 1) 菜单项 + widget
+        // 1) 鑿滃崟椤?+ widget
         let trans_off = if self.switching {
             let f = self.trans_item_frame.min(ANIM_FRAMES);
             EASE_LUT[f as usize] as i32 * 48 / 255
@@ -714,7 +714,7 @@ impl MenuEngine {
                 _ => {}
             }
         }
-        // 2) overlay 标题
+        // 2) overlay 鏍囬
         let title_page = if self.switching && render_old && self.trans_old_page.is_some() {
             self.trans_old_page.unwrap()
         } else {
@@ -755,7 +755,7 @@ impl MenuEngine {
         let _ = Rectangle::new(Point::new(0, HEADER_H - 2), Size::new(128, 1))
             .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
             .draw(buf);
-        // 3) 光标
+        // 3) 鍏夋爣
         if self.switching {
             let tcy = self.trans_cursor_y.val() as i32;
             let tcw = if self.trans_phase == 2 {
@@ -808,7 +808,7 @@ impl MenuEngine {
                 buf,
             );
         }
-        // 5) Toast 横幅
+        // 5) Toast 妯箙
         let toast_text = if let ::core::option::Option::Some(msg) = self.toast_msg {
             Some(msg)
         } else if self.toast_buf_len > 0 {
@@ -841,3 +841,4 @@ impl MenuEngine {
         }
     }
 }
+
