@@ -1,5 +1,4 @@
 use crate::menu::{BufCanvas, MenuEngine, MenuPage};
-use crate::qrcode;
 use crate::ui::{ButtonState, Element, Font};
 use crate::wifi::WifiStatus;
 use crate::{APPROV, AP_SELECTED, NETINFO, SHOW_QR, WIFI_MANUAL};
@@ -287,7 +286,14 @@ impl ViewModel {
         let pixels = (0i32..128).flat_map(move |x| {
             (0i32..64).map(move |y| {
                 let on = (buf.0[(y as usize / 8) * 128 + x as usize] >> (y as u8 % 8)) & 1 != 0;
-                Pixel(Point::new(x, y), if on { BinaryColor::On } else { BinaryColor::Off })
+                Pixel(
+                    Point::new(x, y),
+                    if on {
+                        BinaryColor::On
+                    } else {
+                        BinaryColor::Off
+                    },
+                )
             })
         });
         let _ = target.draw_iter(pixels);
