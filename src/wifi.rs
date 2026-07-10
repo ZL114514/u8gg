@@ -2,7 +2,7 @@
 //!
 //! scan: 同步式阻塞扫描（内部用 noop-waker 轮询）。
 //! connect: 用 connect_async 启动连接，之后每帧调 tick() 推进状态机。
-//! ctrl 存活于整个程序生命周期 (main 不返回), 故 safe 地 transmute 到 'static。
+//! tick() 还会在断开后自动重连（使用上次成功的凭据）。
 
 extern crate alloc;
 use alloc::boxed::Box;
@@ -62,6 +62,9 @@ pub struct ScanResult {
 static mut CONNECT_FUT: Option<BoxFut> = None;
 static mut SCAN_FUT: Option<BoxScanFut> = None;
 static mut SCAN_RESULTS: Option<Vec<AccessPointInfo>> = None;
+/// 上次成功连接 / 准备重连的凭据
+static mut LAST_SSID: Option<String> = None;
+static mut LAST_PASS: Option<String> = None;
 
 // ============================================================================
 //  扫描 (同步阻塞)
@@ -136,8 +139,15 @@ pub fn scan(ctrl: &mut WifiController<'_>) -> Vec<ScanResult> {
 // ============================================================================
 
 /// 发起 WiFi 连接 (异步, 之后每帧调 tick() 推进)
+/// 同时保存凭据用于自动重连。
 pub fn connect(ctrl: &mut WifiController<'_>, ssid: &str, password: &str) {
     let ctrl_static: &'static mut WifiController<'static> = unsafe { core::mem::transmute(ctrl) };
+
+    // 保存凭据用于断线重连
+    unsafe {
+        LAST_SSID = Some(String::from(ssid));
+        LAST_PASS = Some(String::from(password));
+    }
 
     let station_cfg = Config::Station(
         StationConfig::default()
@@ -172,8 +182,9 @@ pub enum WifiStatus {
     Failed,
 }
 
-/// 每帧调用，推进连接异步状态机
-pub fn tick(ctrl: &WifiController<'_>, retry_count: &mut u8) -> WifiStatus {
+/// 每帧调用，推进连接异步状态机。
+/// 断开后自动重连（使用上次保存的凭据）。
+pub fn tick(ctrl: &mut WifiController<'_>, retry_count: &mut u8) -> WifiStatus {
     let p: *mut Option<BoxFut> = unsafe { core::ptr::addr_of_mut!(CONNECT_FUT) };
     let fut = unsafe { &mut *p };
 
@@ -203,6 +214,24 @@ pub fn tick(ctrl: &WifiController<'_>, retry_count: &mut u8) -> WifiStatus {
     } else if *retry_count < MAX_RETRY {
         *retry_count += 1;
         println!("[wifi] Disconnected! Retry {}/{}...", *retry_count, MAX_RETRY);
+        // 自动重连
+        unsafe {
+            let ssid_ref: &Option<String> = &*core::ptr::addr_of_mut!(LAST_SSID).cast_const();
+            let pass_ref: &Option<String> = &*core::ptr::addr_of_mut!(LAST_PASS).cast_const();
+            if let (Some(ssid), Some(pass)) = (ssid_ref.as_ref(), pass_ref.as_ref()) {
+                let ctrl_static: &'static mut WifiController<'static> = core::mem::transmute(ctrl);
+
+                let station_cfg = Config::Station(
+                    StationConfig::default()
+                        .with_ssid(String::from(ssid.as_str()))
+                        .with_password(String::from(pass.as_str())),
+                );
+                let _ = ctrl_static.set_config(&station_cfg);
+
+                let new_fut = Box::pin(ctrl_static.connect_async());
+                *fut = Some(new_fut);
+            }
+        }
         WifiStatus::Connecting
     } else {
         WifiStatus::Failed

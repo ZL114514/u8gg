@@ -467,6 +467,14 @@ impl MenuEngine {
                 self.scroll.snap(0.0);
                 self.dirty = true;
             }
+            (KeyEv::Enter, ::core::option::Option::Some(MenuItem::Label { .. }))
+                if !self.switching =>
+            {
+                if self.osc_timer == 0 {
+                    self.osc_timer = 8;
+                    self.dirty = true;
+                }
+            }
             (KeyEv::LongBack, _) => {
                 self.depth = 0;
                 self.sel = self.sel_stack[0].min(
@@ -633,7 +641,7 @@ impl MenuEngine {
             let tw = text_w(txt);
             // 跑马灯: 选中项超宽文字向左循环滚动 (双份渲染实现无缝衔接)
             if i == self.sel && tw > 116 {
-                let cycle = tw - 116 + 8;
+                let cycle = tw + 8;
                 let moff = (self.marquee_off as i32) % cycle;
                 cn.render(txt, Point::new(4 - moff, y + 2),
                     VerticalPosition::Top, FontColor::Transparent(BinaryColor::On), buf);

@@ -13,20 +13,24 @@ esp-hal = { version = "~1.1.0", features = ["esp32c3", "unstable", "rt"] }
 esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32c3"] }
 esp-backtrace = { version = "0.19.0", features = ["esp32c3", "panic-handler", "println"], default-features = false }
 log = "0.4.33"
-esp-println = {version = "0.17.0", features = ["esp32" , "log-04"]}
+esp-println = {version = "0.17.0", features = ["esp32c3" , "log-04"]}
 
 critical-section = "1.2.0"
+nb = "1.1.0"
 embedded-graphics = "0.8.2"
 ssd1306 = "0.10.0"
 u8g2-fonts = { version = "0.8.0", features = ["embedded_graphics_textstyle"] }
 
 # WiFi (鍙傝€?ESP-IDF DPP Enrollee 渚嬪瓙鐨勪簨浠堕┍鍔ㄦā寮?
 # esp-wifi 宸叉洿鍚嶄负 esp-radio
-esp-radio = { version = "0.18", features = ["esp32", "wifi", "esp-alloc", "unstable"] }
-esp-rtos  = { version = "0.3",  features = ["esp32", "esp-radio", "esp-alloc"] }
+esp-radio = { version = "0.18", features = ["esp32c3", "wifi", "esp-alloc", "unstable"] }
+esp-rtos  = { version = "0.3",  features = ["esp32c3", "esp-radio", "esp-alloc"] }
 esp-alloc = "0.10"
 heapless = "0.9"
-embedded-qr = "0.2.0"
+embedded-qr = { version = "0.2", features = ["embedded-graphics"] }
+
+# TCP 服务器（smoltcp 直接使用，同步轮询）
+smoltcp = { version = "0.12", default-features = false, features = ["proto-ipv4", "socket-tcp", "medium-ip", "alloc"] }
 
 [profile.dev.package.esp-radio]
 opt-level = 3

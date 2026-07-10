@@ -3,6 +3,7 @@ use crate::ui::{ButtonState, Element, Font};
 use crate::wifi::WifiStatus;
 use crate::{APPROV, AP_SELECTED, NETINFO, SHOW_QR, WIFI_MANUAL};
 use embedded_graphics::{draw_target::DrawTarget, pixelcolor::BinaryColor, prelude::*};
+use embedded_qr::{QrBuilder, QrMatrix, Version10};
 use esp_hal::efuse::{self, InterfaceMacAddress};
 use u8g2_fonts::{types::FontColor, types::VerticalPosition, FontRenderer};
 
@@ -36,7 +37,7 @@ pub struct ViewModel {
     pub btn: [bool; 4],
     pub wifi_ssid: &'static str,
     pub wifi_pass: &'static str,
-    pub cached_qr: Option<qrcode::QrCode>,
+    pub cached_qr: Option<embedded_qr::QrMatrix<embedded_qr::Version10>>,
     pub show_ap_qr: bool,
     wifi_status: WifiStatus,
     wifi_connected: bool,
@@ -99,7 +100,7 @@ impl ViewModel {
                 if self.menu.bind_bools[SHOW_QR] {
                     self.menu.bind_bools[SHOW_QR] = false;
                     if self.cached_qr.is_none() && !self.wifi_ssid.is_empty() {
-                        self.cached_qr = qrcode::encode_wifi(self.wifi_ssid, self.wifi_pass).ok();
+                        self.cached_qr = QrBuilder::<Version10>::new().build(self.wifi_ssid.as_bytes()).ok();
                     }
                     self.screen = AppScreen::WifiQr;
                     self.menu.dirty = true;
@@ -183,10 +184,10 @@ impl ViewModel {
                     AppScreen::WifiQr => {
                         if let Some(ref qr) = self.cached_qr {
                             let ms = 2u32; let quiet = 3u32;
-                            let total = qr.size as u32 * ms + quiet * 2;
+                            let total = qr.width() as u32 * ms + quiet * 2;
                             let ox = (128i32 - total as i32) / 2;
                             let oy = (64i32 - total as i32) / 2;
-                            for y in 0..qr.size as u32 { for x in 0..qr.size as u32 {
+                            for y in 0..qr.width() as u32 { for x in 0..qr.width() as u32 {
                                 if qr.get(x as usize, y as usize) {
                                     buf.invert_rect(ox + quiet as i32 + (x * ms) as i32, oy + quiet as i32 + (y * ms) as i32, ms, ms, 0);
                                 }
@@ -198,10 +199,10 @@ impl ViewModel {
                         if self.show_ap_qr {
                             if let Some(ref qr) = self.cached_qr {
                                 let ms = 2u32; let quiet = 3u32;
-                                let total = qr.size as u32 * ms + quiet * 2;
+                                let total = qr.width() as u32 * ms + quiet * 2;
                                 let ox = (128i32 - total as i32) / 2;
                                 let oy = (64i32 - total as i32) / 2;
-                                for y in 0..qr.size as u32 { for x in 0..qr.size as u32 {
+                                for y in 0..qr.width() as u32 { for x in 0..qr.width() as u32 {
                                     if qr.get(x as usize, y as usize) {
                                         buf.invert_rect(ox + quiet as i32 + (x * ms) as i32, oy + quiet as i32 + (y * ms) as i32, ms, ms, 0);
                                     }

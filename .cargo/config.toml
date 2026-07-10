@@ -1,10 +1,8 @@
-﻿[target.xtensa-esp32-none-elf]
-runner = "espflash flash --monitor --chip esp32"
-
-[env]
+﻿[target.riscv32imc-unknown-none-elf]
+runner = "espflash flash --monitor --chip esp32c3"
 
 [build]
-target = "xtensa-esp32-none-elf"
+target = "riscv32imc-unknown-none-elf"
 
 [unstable]
 build-std = ["core", "alloc"]
