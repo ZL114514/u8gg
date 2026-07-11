@@ -180,8 +180,7 @@ where
                     BinaryColor::Off
                 } else {
                     BinaryColor::On
-                }))
-                .draw(target);
+                }));
                 // 标签
                 let _ = r6.render(
                     *label,

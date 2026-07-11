@@ -99,6 +99,10 @@ pub enum MenuItem {
         label: &'static str,
         page: &'static MenuPage,
     },
+    /// Custom rendering function. Called after all normal items are drawn.
+    Custom {
+        render: fn(&mut BufCanvas, &MenuEngine),
+    },
 }
 #[derive(Clone, Copy)]
 pub struct MenuPage {
@@ -181,6 +185,7 @@ fn label_text(item: &MenuItem) -> &'static str {
         | MenuItem::Toggle { label, .. }
         | MenuItem::Slider { label, .. }
         | MenuItem::Submenu { label, .. } => label,
+        MenuItem::Custom { .. } => "",
     }
 }
 fn text_w(text: &str) -> i32 {
@@ -720,6 +725,12 @@ impl MenuEngine {
                     );
                 }
                 _ => {}
+            }
+        }
+        // Render Custom items as overlays (on top of everything)
+        for item in render_items {
+            if let MenuItem::Custom { render } = item {
+                render(buf, self);
             }
         }
         // 2) overlay 标题
