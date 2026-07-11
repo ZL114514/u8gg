@@ -8,6 +8,7 @@ use embedded_qr::{QrBuilder, QrMatrix, Version10};
 use core::cell::RefCell;
 use embedded_graphics::{pixelcolor::BinaryColor, prelude::*};
 use esp_backtrace as _;
+use esp_hal::analog::adc::{Adc, AdcConfig, Attenuation};
 use esp_hal::{
     clock::CpuClock,
     delay::Delay,
@@ -341,18 +342,24 @@ fn main() -> ! {
     println!("[u8gg] WiFi initialized");
     let mut wifi_retry = 0u8;
 
-    let k1 = Input::new(peripherals.GPIO1, InputConfig::default().with_pull(Pull::Up));
-    let k2 = Input::new(peripherals.GPIO2, InputConfig::default().with_pull(Pull::Up));
-    let k3 = Input::new(peripherals.GPIO3, InputConfig::default().with_pull(Pull::Up));
-    let k4 = Input::new(peripherals.GPIO4, InputConfig::default().with_pull(Pull::Up));
+    let k1 = Input::new(peripherals.GPIO23, InputConfig::default().with_pull(Pull::Up));
+    let k2 = Input::new(peripherals.GPIO25, InputConfig::default().with_pull(Pull::Up));
+    let k3 = Input::new(peripherals.GPIO26, InputConfig::default().with_pull(Pull::Up));
+    let k4 = Input::new(peripherals.GPIO27, InputConfig::default().with_pull(Pull::Up));
+    // ===== HW-504 摇杆 =====
+    let mut adc_cfg = AdcConfig::default();
+    let mut adc_vry = adc_cfg.enable_pin(peripherals.GPIO34, Attenuation::_11dB);
+    let mut adc_vrx = adc_cfg.enable_pin(peripherals.GPIO35, Attenuation::_11dB);
+    let mut adc = Adc::new(peripherals.ADC1, adc_cfg);
+    let joy_sw = Input::new(peripherals.GPIO32, InputConfig::default().with_pull(Pull::Up));
 
     let mut i2c = I2c::new(
         peripherals.I2C0,
         I2cConfig::default().with_frequency(Rate::from_khz(400)),
     )
     .unwrap()
-    .with_sda(peripherals.GPIO8)
-    .with_scl(peripherals.GPIO9);
+    .with_sda(peripherals.GPIO21)
+    .with_scl(peripherals.GPIO22);
     let addr_ok = i2c.write(0x3D, &[0x00]).is_ok();
     println!("[u8gg] I2C probe 0x3D: {}", if addr_ok { "OK" } else { "FAIL" });
     if !addr_ok {
@@ -393,6 +400,17 @@ fn main() -> ! {
     let mut last_fps_print = 0u32;
     let mut pk = [true; 4];
     let mut hold = [0u16; 4];
+    let mut joy_up = false;
+    let mut joy_down = false;
+    let mut joy_btn = false;
+    let mut joy_left = false;
+    let mut vry_up_prev = false;
+    let mut vry_dn_prev = false;
+    let mut vrx_lf_prev = false;
+    let mut vrx_rt_prev = false;
+    let mut joy_sw_prev = false;
+    let mut joy_hold_up = 0u16;
+    let mut joy_hold_dn = 0u16;
 
     let mut scan_started = false;
     let mut provision = provision::Provisioning::new();
@@ -430,10 +448,10 @@ fn main() -> ! {
         pk = c;
 
         vm.handle_key(
-            edge[0] || repeat_up,
-            edge[1] || repeat_down,
-            edge[3],
-            edge[2],
+            edge[0] || repeat_up || joy_up,
+            edge[1] || repeat_down || joy_down,
+            edge[3] || joy_btn,
+            edge[2] || joy_left,
             long_edge[2],
             long_edge[3],
         );
