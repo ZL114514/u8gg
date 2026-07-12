@@ -3,8 +3,6 @@
 //! WifiPhy — smoltcp Device 桥接 (需要硬件上调试)
 //! Provisioning — AP 模式 + 凭据接收状态机
 
-extern crate alloc;
-
 use esp_radio::wifi::{
     ap::AccessPointConfig, Config, WifiController, Ssid,
 };

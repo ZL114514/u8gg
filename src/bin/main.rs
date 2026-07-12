@@ -1,50 +1,26 @@
-#![no_std]
-#![no_main]
+#![allow(dead_code, unused_imports)]
 
-extern crate alloc;
-
-use alloc::string::String;
-use core::cell::RefCell;
 use embedded_graphics::{pixelcolor::BinaryColor, prelude::*};
-use esp_backtrace as _;
-use esp_hal::{
-    clock::CpuClock,
-    delay::Delay,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
-    i2c::master::{Config as I2cConfig, I2c},
-    interrupt::software::SoftwareInterruptControl,
-    main,
-    time::Rate,
-    timer::timg::TimerGroup,
-    Config,
-};
-use esp_println::println;
+use esp_idf_svc::hal::gpio::{Input, PinDriver, Pull};
+use esp_idf_svc::hal::i2c::{I2cConfig, I2cDriver};
+use esp_idf_svc::hal::peripherals::Peripherals;
+use esp_idf_svc::log::EspLogger;
+use esp_idf_svc::sys::link_patches;
+use log::info;
 use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
 
-// ===== 堆分配器 =====
-esp_bootloader_esp_idf::esp_app_desc!();
-#[unsafe(no_mangle)]
-static mut HEAP: core::mem::MaybeUninit<[u8; 72 * 1024]> = core::mem::MaybeUninit::uninit();
-unsafe fn init_heap() {
-    esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
-        core::ptr::addr_of_mut!(HEAP) as *mut u8,
-        72 * 1024,
-        esp_alloc::MemoryCapability::Internal.into(),
-    ));
-}
-
+// ===== 模块 (源文件在 src/ 下) =====
 #[path = "../menu.rs"]
 mod menu;
-#[path = "../provision.rs"]
-mod provision;
-#[path = "../qrcode.rs"]
-mod qrcode;
 #[path = "../ui.rs"]
 mod ui;
 #[path = "../viewmodel.rs"]
 mod viewmodel;
 #[path = "../wifi.rs"]
 mod wifi;
+#[path = "../qrcode.rs"]
+mod qrcode;
+// provision.rs 为未接线的死代码(引用已移除的 esp-radio/smoltcp)，不参与编译
 
 use menu::*;
 use ui::*;
@@ -85,7 +61,7 @@ static PAGE_ABOUT: MenuPage = MenuPage {
         MenuItem::Label { label: "u8gg v0.1" },
         MenuItem::Label { label: "ESP32-C3" },
         MenuItem::Label { label: "Apache-2.0" },
-        MenuItem::Label { label: ("Powered by Deepseek V4 Flash") },
+        MenuItem::Label { label: "Powered by Deepseek V4 Flash" },
     ],
 };
 static PAGE_MAIN: MenuPage = MenuPage {
@@ -101,40 +77,38 @@ static PAGE_MAIN: MenuPage = MenuPage {
     ],
 };
 
-#[main]
-fn main() -> ! {
-    let peripherals = esp_hal::init(Config::default().with_cpu_clock(CpuClock::max()));
-    unsafe { init_heap(); }
-    println!("[u8gg] Boot OK");
+fn main() {
+    // ESP-IDF 标准库初始化（提供 std 的 newlib 锁等）
+    link_patches();
+    EspLogger::initialize_default();
+    info!("[u8gg] Boot OK");
 
-    let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
-    println!("[u8gg] RTOS started");
+    // 取出外设（Peripherals 为拥有权，必须按字段取出；modem 交给 WiFi）
+    let mut peripherals = Peripherals::take().unwrap();
+    let modem = peripherals.modem;
+    let pins = peripherals.pins;
+    let i2c0 = peripherals.i2c0;
+    // 其余外设丢弃
 
-    let (mut wifi_ctrl, _interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, Default::default()).unwrap();
-    println!("[u8gg] WiFi initialized");
+    // ===== WiFi (esp-idf-svc) =====
+    let mut wifi_ctl = wifi::init(modem).expect("wifi init failed");
+    info!("[u8gg] WiFi initialized");
     let mut wifi_retry = 0u8;
 
-    let k1 = Input::new(peripherals.GPIO1, InputConfig::default().with_pull(Pull::Up));
-    let k2 = Input::new(peripherals.GPIO2, InputConfig::default().with_pull(Pull::Up));
-    let k3 = Input::new(peripherals.GPIO3, InputConfig::default().with_pull(Pull::Up));
-    let k4 = Input::new(peripherals.GPIO4, InputConfig::default().with_pull(Pull::Up));
+    // ===== 按键 (GPIO1..4, 上拉, 低电平=按下) =====
+    let k1 = PinDriver::input(pins.gpio1).unwrap();
+    let k2 = PinDriver::input(pins.gpio2).unwrap();
+    let k3 = PinDriver::input(pins.gpio3).unwrap();
+    let k4 = PinDriver::input(pins.gpio4).unwrap();
 
-    let mut i2c = I2c::new(
-        peripherals.I2C0,
-        I2cConfig::default().with_frequency(Rate::from_khz(400)),
-    )
-    .unwrap()
-    .with_sda(peripherals.GPIO8)
-    .with_scl(peripherals.GPIO9);
-    let addr_ok = i2c.write(0x3D, &[0x00]).is_ok();
-    println!("[u8gg] I2C probe 0x3D: {}", if addr_ok { "OK" } else { "FAIL" });
+    // ===== I2C (SDA=GPIO8, SCL=GPIO9) =====
+    let mut i2c = I2cDriver::new(i2c0, pins.gpio8, pins.gpio9, &I2cConfig::new()).unwrap();
+
+    let addr_ok = i2c.write(0x3D, &[0x00], 100).is_ok();
+    info!("[u8gg] I2C probe 0x3D: {}", if addr_ok { "OK" } else { "FAIL" });
     if !addr_ok {
-        // 尝试标准地址 0x3C
-        let addr2_ok = i2c.write(0x3C, &[0x00]).is_ok();
-        println!("[u8gg] I2C probe 0x3C: {}", if addr2_ok { "OK" } else { "FAIL" });
+        let addr2_ok = i2c.write(0x3C, &[0x00], 100).is_ok();
+        info!("[u8gg] I2C probe 0x3C: {}", if addr2_ok { "OK" } else { "FAIL" });
     }
     let iface = if addr_ok {
         I2CDisplayInterface::new_alternate_address(i2c)
@@ -144,16 +118,16 @@ fn main() -> ! {
     let mut display = Ssd1306::new(iface, DisplaySize128x64, DisplayRotation::Rotate0)
         .into_buffered_graphics_mode();
     let mut oled_ok = false;
-    for i in 0..10 {
-        spin_delay(100);
+    for _ in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
         if display.init().is_ok() {
-            println!("[u8gg] OLED init OK (attempt {})", i + 1);
+            info!("[u8gg] OLED init OK");
             oled_ok = true;
             break;
         }
     }
     if !oled_ok {
-        println!("[u8gg] OLED init FAILED — will skip display");
+        info!("[u8gg] OLED init FAILED — will skip display");
     } else {
         display.clear(BinaryColor::Off).unwrap();
         let _ = display.flush();
@@ -173,24 +147,37 @@ fn main() -> ! {
     let mut hold = [0u16; 4];
 
     loop {
-        spin_delay(5);
+        std::thread::sleep(std::time::Duration::from_millis(5));
         tick_ms = tick_ms.wrapping_add(5);
         fps_counter += 1;
 
-        let c = [k1.is_low(), k2.is_low(), k3.is_low(), k4.is_low()];
+        let c = [
+            k1.is_low(),
+            k2.is_low(),
+            k3.is_low(),
+            k4.is_low(),
+        ];
         let edge = [c[0] && !pk[0], c[1] && !pk[1], c[2] && !pk[2], c[3] && !pk[3]];
         let mut long_edge = [false; 4];
         let mut repeat_up = false;
         let mut repeat_down = false;
 
         for i in 0..4 {
-            if c[i] { hold[i] = hold[i].saturating_add(1); } else { hold[i] = 0; }
+            if c[i] {
+                hold[i] = hold[i].saturating_add(1);
+            } else {
+                hold[i] = 0;
+            }
             let h = hold[i];
             if i < 2 {
                 if h >= 66 {
                     let interval = if h < 90 { 4 } else if h < 120 { 3 } else { 2 };
                     if (h - 66) % interval == 0 {
-                        if i == 0 { repeat_up = true; } else { repeat_down = true; }
+                        if i == 0 {
+                            repeat_up = true;
+                        } else {
+                            repeat_down = true;
+                        }
                     }
                 }
             } else if h == 66 {
@@ -199,26 +186,27 @@ fn main() -> ! {
         }
         pk = c;
 
-        let any_key = edge[0] || edge[1] || edge[2] || edge[3]
-            || long_edge[2] || long_edge[3] || repeat_up || repeat_down;
-
         vm.handle_key(
-            edge[0] || repeat_up, edge[1] || repeat_down,
-            edge[3], edge[2], long_edge[2], long_edge[3],
+            edge[0] || repeat_up,
+            edge[1] || repeat_down,
+            edge[3],
+            edge[2],
+            long_edge[2],
+            long_edge[3],
         );
 
-        let wifi_status = wifi::tick(&mut wifi_ctrl, &mut wifi_retry);
+        let wifi_status = wifi::tick(&mut wifi_ctl, &mut wifi_retry);
         if vm.consume_wifi_connect() {
             let ssid = vm.input_ssid();
             let pass = vm.input_pass();
             if !ssid.is_empty() {
-                println!("[u8gg] WiFi connect to \"{}\"", ssid);
-                wifi::connect(&mut wifi_ctrl, ssid, pass);
+                info!("[u8gg] WiFi connect to \"{}\"", ssid);
+                let _ = wifi::connect(&mut wifi_ctl, ssid, pass);
                 wifi_retry = 0;
             }
         }
         vm.set_wifi_status(wifi_status);
-        vm.set_wifi_connected(wifi_ctrl.is_connected());
+        vm.set_wifi_connected(wifi::is_connected(&wifi_ctl));
 
         if oled_ok {
             canvas.clear();
@@ -228,13 +216,9 @@ fn main() -> ! {
         }
 
         if tick_ms - last_fps_print >= 5000 {
-            println!("[u8gg] FPS: {}", fps_counter * 1000 / (tick_ms - last_fps_print).max(1));
+            info!("[u8gg] FPS: {}", fps_counter * 1000 / (tick_ms - last_fps_print).max(1));
             fps_counter = 0;
             last_fps_print = tick_ms;
         }
     }
-}
-
-fn spin_delay(ms: u32) {
-    for _ in 0..ms * 16000 { core::hint::spin_loop(); }
 }

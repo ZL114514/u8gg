@@ -1,10 +1,23 @@
-[target.riscv32imc-unknown-none-elf]
+[build]
+target = "riscv32imc-esp-espidf"
+
+[target.riscv32imc-esp-espidf]
+# ldproxy is a linker wrapper that consumes the link args esp-idf-sys emits
+# (linkall.ld, memory layout, libs). Install it with `cargo install ldproxy`.
+linker = "ldproxy"
 runner = "espflash flash --monitor --chip esp32c3"
+# Do NOT hand-write -Tlinkall.ld here: esp-idf-sys/embuild inject the correct
+# linker script + args automatically, and ldproxy forwards them.
+rustflags = ["--cfg", "espidf_time64"]
+
+# The `esp` toolchain ships no precompiled rust-std for the esp-espidf target,
+# and rustup cannot `component add` it to a linked toolchain. Build std from the
+# bundled rust-src instead. The target spec forces panic="abort", so we must
+# include panic_abort and set panic="abort" in the profiles (see Cargo.toml).
+[unstable]
+build-std = ["std", "panic_abort"]
 
 [env]
-
-[build]
-target = "riscv32imc-unknown-none-elf"
-
-[unstable]
-build-std = ["core", "alloc"]
+MCU = "esp32c3"
+# Pin ESP-IDF to a version supported by esp-idf-svc 0.51 (v5.2/v5.3).
+ESP_IDF_VERSION = "v5.3.3"
